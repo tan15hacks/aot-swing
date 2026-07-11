@@ -48,15 +48,15 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
     <div class="start-card">
       <p class="eyebrow">LOW-POLY FIRST-PERSON TRAVERSAL</p>
       <h1>Skyline Tether</h1>
-      <p>Use two energy tethers to swing through the city, collect shards, avoid hazards, and reach the green exit ring.</p>
+      <p>Use two assisted energy tethers to swing through the city, run across walls, collect shards, avoid hazards, and reach the green exit ring.</p>
       <div class="instructions desktop-help">
-        <span><b>Mouse</b> Look</span><span><b>L/R Click</b> Tethers</span><span><b>WASD</b> Move</span><span><b>Space</b> Boost</span><span><b>Shift</b> Brake</span>
+        <span><b>Mouse</b> Look</span><span><b>L/R Click</b> Tethers</span><span><b>WASD</b> Move</span><span><b>Space</b> Boost</span><span><b>Forward + wall</b> Wall run</span>
       </div>
       <div class="instructions touch-help">
-        <span><b>Left stick</b> Move</span><span><b>Swipe anywhere</b> Look</span><span><b>Hold + drag L/R</b> Aim tether</span><span><b>Boost</b> Accelerate</span>
+        <span><b>Left stick</b> Move</span><span><b>Swipe anywhere</b> Look</span><span><b>Hold + drag L/R</b> Aim tether</span><span><b>Forward + wall</b> Wall run</span>
       </div>
       <button class="start-button" data-ui="start">Start Run</button>
-      <small>Tip: hold a tether button and drag that same thumb to keep aiming.</small>
+      <small>Smart swing tip: aim above and ahead, hold the tether, then release while moving forward.</small>
     </div>
   </section>
 `;
