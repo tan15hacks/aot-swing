@@ -25,12 +25,19 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
   <div class="message" data-hud="message">Level 1</div>
 
   <div class="touch-controls">
-    <div class="joystick" data-control="joystick">
+    <button class="control grapple left" data-control="grapple-left" aria-label="Hold and drag to aim the left tether">
+      <strong>L</strong><span>LEFT TETHER</span>
+    </button>
+
+    <div class="joystick" data-control="joystick" aria-label="Movement joystick">
       <div class="joystick-knob" data-control="joystick-knob"></div>
     </div>
-    <div class="action-grid">
-      <button class="control grapple left" data-control="grapple-left" aria-label="Left tether">L</button>
-      <button class="control grapple right" data-control="grapple-right" aria-label="Right tether">R</button>
+
+    <button class="control grapple right" data-control="grapple-right" aria-label="Hold and drag to aim the right tether">
+      <strong>R</strong><span>RIGHT TETHER</span>
+    </button>
+
+    <div class="center-controls">
       <button class="control boost" data-control="boost">BOOST</button>
       <button class="control brake" data-control="brake">BRAKE</button>
       <button class="control reset" data-control="reset">RESET</button>
@@ -43,13 +50,13 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
       <h1>Skyline Tether</h1>
       <p>Use two energy tethers to swing through the city, collect shards, avoid hazards, and reach the green exit ring.</p>
       <div class="instructions desktop-help">
-        <span><b>Mouse</b> Look</span><span><b>L/R Click</b> Tethers</span><span><b>WASD</b> Steer</span><span><b>Space</b> Boost</span><span><b>Shift</b> Brake</span>
+        <span><b>Mouse</b> Look</span><span><b>L/R Click</b> Tethers</span><span><b>WASD</b> Move</span><span><b>Space</b> Boost</span><span><b>Shift</b> Brake</span>
       </div>
       <div class="instructions touch-help">
-        <span><b>Drag screen</b> Look</span><span><b>Joystick</b> Steer</span><span><b>L / R</b> Tethers</span><span><b>Boost</b> Accelerate</span>
+        <span><b>Left stick</b> Move</span><span><b>Swipe anywhere</b> Look</span><span><b>Hold + drag L/R</b> Aim tether</span><span><b>Boost</b> Accelerate</span>
       </div>
       <button class="start-button" data-ui="start">Start Run</button>
-      <small>Original prototype inspired by high-speed dual-tether movement.</small>
+      <small>Tip: hold a tether button and drag that same thumb to keep aiming.</small>
     </div>
   </section>
 `;
