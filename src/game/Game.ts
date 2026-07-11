@@ -1,13 +1,19 @@
 import * as THREE from 'three';
-import { InputController, type GrappleSide } from './InputController';
+import { InputController, type GrappleSide, type InputSnapshot } from './InputController';
 import { createLevel, type LevelData } from './Level';
 
 interface GrappleState {
   active: boolean;
   target: THREE.Vector3;
+  ropeLength: number;
   line: THREE.Line;
   previousHeld: boolean;
   side: GrappleSide;
+}
+
+interface WallContact {
+  normal: THREE.Vector3;
+  distance: number;
 }
 
 interface HudRefs {
@@ -20,6 +26,8 @@ interface HudRefs {
   startOverlay: HTMLElement;
   startButton: HTMLButtonElement;
 }
+
+const UP = new THREE.Vector3(0, 1, 0);
 
 export class Game {
   private readonly renderer: THREE.WebGLRenderer;
@@ -34,12 +42,14 @@ export class Game {
   private readonly playerRadius = 0.72;
   private readonly eyeHeight = 1.78;
   private readonly yawPitch = new THREE.Euler(0, 0, 0, 'YXZ');
+  private readonly wallRunNormal = new THREE.Vector3();
   private level!: LevelData;
   private levelNumber = 1;
   private score = 0;
   private energy = 100;
   private playing = false;
   private grounded = false;
+  private wallRunning = false;
   private levelStartedAt = performance.now();
   private collisionCooldown = 0;
   private leftGrapple!: GrappleState;
@@ -139,6 +149,7 @@ export class Game {
     return {
       active: false,
       target: new THREE.Vector3(),
+      ropeLength: 0,
       line,
       previousHeld: false,
       side,
@@ -158,12 +169,14 @@ export class Game {
     this.velocity.set(0, 0, 0);
     this.energy = 100;
     this.grounded = false;
+    this.wallRunning = false;
+    this.wallRunNormal.set(0, 0, 0);
     this.levelStartedAt = performance.now();
     this.yawPitch.set(-0.04, 0, 0);
     this.camera.quaternion.setFromEuler(this.yawPitch);
     this.updateCameraPosition();
-    this.releaseGrapple(this.leftGrapple);
-    this.releaseGrapple(this.rightGrapple);
+    this.releaseGrapple(this.leftGrapple, false);
+    this.releaseGrapple(this.rightGrapple, false);
     this.showMessage(message);
   }
 
@@ -187,20 +200,31 @@ export class Game {
 
   private update(delta: number): void {
     const input = this.input.snapshot();
-    this.handleGrappleInput(this.leftGrapple, input.grappleLeft, -0.05);
-    this.handleGrappleInput(this.rightGrapple, input.grappleRight, 0.05);
+    this.handleGrappleInput(this.leftGrapple, input.grappleLeft, -0.04);
+    this.handleGrappleInput(this.rightGrapple, input.grappleRight, 0.04);
 
-    const wasGrounded = this.grounded;
+    const previousWallRunning = this.wallRunning;
+    const wallContact = this.findWallContact();
+    const horizontalSpeed = Math.hypot(this.velocity.x, this.velocity.z);
+    this.wallRunning = Boolean(wallContact && input.moveY > 0.12 && horizontalSpeed > 2.5);
+
+    if (this.wallRunning && wallContact) {
+      this.wallRunNormal.copy(wallContact.normal);
+      this.applyWallRun(wallContact, input, delta);
+      if (!previousWallRunning) this.showMessage('Wall run');
+    }
+
+    this.updateCameraTilt(delta);
+
+    const wasGrounded = this.grounded && !this.wallRunning;
     const moveStrength = Math.min(1, Math.hypot(input.moveX, input.moveY));
-    const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion);
+    const forward = this.getFlatCameraForward();
     const right = new THREE.Vector3(1, 0, 0).applyQuaternion(this.camera.quaternion);
-    forward.y = 0;
     right.y = 0;
-    forward.normalize();
     right.normalize();
 
     const moveDirection = forward.multiplyScalar(input.moveY).add(right.multiplyScalar(input.moveX));
-    if (moveDirection.lengthSq() > 0.001) {
+    if (moveDirection.lengthSq() > 0.001 && !this.wallRunning) {
       moveDirection.normalize();
       const movementAcceleration = wasGrounded ? 46 : 26;
       this.velocity.addScaledVector(moveDirection, movementAcceleration * moveStrength * delta);
@@ -221,15 +245,18 @@ export class Game {
       this.velocity.z *= groundDamping;
     }
 
-    this.velocity.y -= 15 * delta;
-    this.velocity.multiplyScalar(Math.pow(0.998, delta * 60));
+    this.velocity.y -= (this.wallRunning ? 2.2 : 15) * delta;
+    const hasGrapple = this.leftGrapple.active || this.rightGrapple.active;
+    this.velocity.multiplyScalar(Math.pow(hasGrapple ? 0.9995 : 0.998, delta * 60));
 
-    this.applyGrappleForce(this.leftGrapple, delta);
-    this.applyGrappleForce(this.rightGrapple, delta);
+    this.applyGrappleForce(this.leftGrapple, input, delta);
+    this.applyGrappleForce(this.rightGrapple, input, delta);
 
     if (input.boost && this.energy > 0) {
-      const boostDirection = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion).normalize();
-      this.velocity.addScaledVector(boostDirection, 34 * delta);
+      const boostDirection = this.getBoostDirection();
+      const boostForce = this.wallRunning ? 42 : hasGrapple ? 38 : 34;
+      this.velocity.addScaledVector(boostDirection, boostForce * delta);
+      if (this.wallRunning) this.velocity.y += 5.5 * delta;
       this.energy = Math.max(0, this.energy - 22 * delta);
     } else {
       this.energy = Math.min(100, this.energy + 11 * delta);
@@ -237,7 +264,7 @@ export class Game {
 
     if (input.brake) this.velocity.multiplyScalar(Math.pow(0.91, delta * 60));
 
-    const maxSpeed = input.boost ? 62 : 46;
+    const maxSpeed = input.boost ? 72 : hasGrapple ? 60 : 46;
     if (this.velocity.length() > maxSpeed) this.velocity.setLength(maxSpeed);
 
     this.grounded = false;
@@ -255,64 +282,234 @@ export class Game {
     this.updateReticle();
   }
 
+  private getFlatCameraForward(): THREE.Vector3 {
+    const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion);
+    forward.y = 0;
+    if (forward.lengthSq() < 0.001) forward.set(0, 0, -1);
+    return forward.normalize();
+  }
+
+  private getBoostDirection(): THREE.Vector3 {
+    const direction = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion).normalize();
+
+    for (const grapple of [this.leftGrapple, this.rightGrapple]) {
+      if (!grapple.active) continue;
+      const radial = grapple.target.clone().sub(this.playerPosition).normalize();
+      direction.projectOnPlane(radial);
+    }
+
+    if (this.wallRunning) {
+      direction.projectOnPlane(this.wallRunNormal);
+      direction.y = Math.max(direction.y, 0.12);
+    }
+
+    if (direction.lengthSq() < 0.001) return this.getFlatCameraForward();
+    return direction.normalize();
+  }
+
   private updateCameraPosition(): void {
     this.camera.position.copy(this.playerPosition);
     this.camera.position.y += this.eyeHeight;
   }
 
+  private updateCameraTilt(delta: number): void {
+    const cameraRight = new THREE.Vector3(1, 0, 0).applyQuaternion(this.camera.quaternion);
+    const targetRoll = this.wallRunning
+      ? THREE.MathUtils.clamp(this.wallRunNormal.dot(cameraRight) * 0.14, -0.14, 0.14)
+      : 0;
+    this.yawPitch.z = THREE.MathUtils.lerp(this.yawPitch.z, targetRoll, Math.min(1, delta * 7));
+    this.camera.quaternion.setFromEuler(this.yawPitch);
+  }
+
   private handleGrappleInput(grapple: GrappleState, held: boolean, ndcX: number): void {
     if (held && !grapple.previousHeld) this.fireGrapple(grapple, ndcX);
-    if (!held && grapple.previousHeld) this.releaseGrapple(grapple);
+    if (!held && grapple.previousHeld) this.releaseGrapple(grapple, true);
     grapple.previousHeld = held;
   }
 
   private fireGrapple(grapple: GrappleState, ndcX: number): void {
-    const hit = this.findGrappleHit(ndcX);
+    const hit = this.findGrappleHit(ndcX, true);
     if (!hit) return;
 
     grapple.active = true;
     grapple.target.copy(hit.point);
+    const distance = this.playerPosition.distanceTo(grapple.target);
+    grapple.ropeLength = THREE.MathUtils.clamp(distance * 0.8, 7, 68);
     grapple.line.visible = true;
+
+    const initialPull = grapple.target.clone().sub(this.playerPosition).normalize();
+    this.velocity.addScaledVector(initialPull, Math.min(4.5, distance * 0.06));
     this.score += 5;
   }
 
-  private findGrappleHit(ndcX: number): THREE.Intersection | undefined {
-    const aimSamples = [
-      new THREE.Vector2(ndcX, 0),
-      new THREE.Vector2(0, 0),
-      new THREE.Vector2(ndcX - 0.065, 0),
-      new THREE.Vector2(ndcX + 0.065, 0),
-      new THREE.Vector2(ndcX, -0.055),
-      new THREE.Vector2(ndcX, 0.055),
-    ];
+  private findGrappleHit(ndcX: number, fullAssist: boolean): THREE.Intersection | undefined {
+    const samples = fullAssist
+      ? [
+          new THREE.Vector2(ndcX, 0),
+          new THREE.Vector2(0, 0),
+          new THREE.Vector2(ndcX, 0.1),
+          new THREE.Vector2(ndcX, 0.2),
+          new THREE.Vector2(ndcX - 0.09, 0.08),
+          new THREE.Vector2(ndcX + 0.09, 0.08),
+          new THREE.Vector2(ndcX - 0.15, 0.16),
+          new THREE.Vector2(ndcX + 0.15, 0.16),
+          new THREE.Vector2(ndcX, -0.07),
+        ]
+      : [
+          new THREE.Vector2(ndcX, 0),
+          new THREE.Vector2(ndcX, 0.1),
+          new THREE.Vector2(ndcX - 0.08, 0.06),
+          new THREE.Vector2(ndcX + 0.08, 0.06),
+        ];
 
     let bestHit: THREE.Intersection | undefined;
-    for (const sample of aimSamples) {
+    let bestScore = -Infinity;
+
+    for (const sample of samples) {
       this.raycaster.setFromCamera(sample, this.camera);
-      this.raycaster.far = 110;
+      this.raycaster.far = 115;
       const hit = this.raycaster.intersectObjects(this.level.grappleMeshes, false)[0];
-      if (hit && (!bestHit || hit.distance < bestHit.distance)) bestHit = hit;
+      if (!hit) continue;
+
+      const heightDifference = hit.point.y - this.camera.position.y;
+      const aimOffset = Math.abs(sample.x - ndcX) + Math.abs(sample.y) * 0.7;
+      const score =
+        THREE.MathUtils.clamp(heightDifference, -8, 32) * 0.75 +
+        Math.min(hit.distance, 80) * 0.09 -
+        aimOffset * 11;
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestHit = hit;
+      }
     }
+
     return bestHit;
   }
 
-  private releaseGrapple(grapple: GrappleState): void {
+  private releaseGrapple(grapple: GrappleState, preserveMomentum: boolean): void {
+    if (grapple.active && preserveMomentum && this.velocity.length() > 9) {
+      const travelDirection = this.velocity.clone().normalize();
+      const cameraForward = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion).normalize();
+      const alignment = Math.max(0, travelDirection.dot(cameraForward));
+      this.velocity.addScaledVector(cameraForward, 0.8 + alignment * 1.4);
+    }
+
     grapple.active = false;
+    grapple.ropeLength = 0;
     grapple.line.visible = false;
   }
 
-  private applyGrappleForce(grapple: GrappleState, delta: number): void {
+  private applyGrappleForce(grapple: GrappleState, input: InputSnapshot, delta: number): void {
     if (!grapple.active) return;
-    const toTarget = grapple.target.clone().sub(this.playerPosition);
-    const distance = toTarget.length();
-    if (distance < 1) return;
 
-    const direction = toTarget.divideScalar(distance);
-    const pullStrength = THREE.MathUtils.clamp(30 + distance * 0.65, 30, 72);
-    this.velocity.addScaledVector(direction, pullStrength * delta);
+    const toAnchor = grapple.target.clone().sub(this.playerPosition);
+    const distance = toAnchor.length();
+    if (distance < 1.5) return;
 
-    const radialSpeed = this.velocity.dot(direction);
-    if (radialSpeed < -2) this.velocity.addScaledVector(direction, -radialSpeed * 0.28);
+    const directionToAnchor = toAnchor.divideScalar(distance);
+    const anchorHeight = grapple.target.y - this.playerPosition.y;
+    const reelRate = anchorHeight > 2 ? 4.2 : 1.8;
+    grapple.ropeLength = Math.max(6.5, grapple.ropeLength - reelRate * delta);
+
+    const stretch = Math.max(0, distance - grapple.ropeLength);
+    if (stretch > 0) {
+      const springForce = THREE.MathUtils.clamp(24 + stretch * 42, 24, 125);
+      this.velocity.addScaledVector(directionToAnchor, springForce * delta);
+
+      const outward = directionToAnchor.clone().negate();
+      const outwardSpeed = this.velocity.dot(outward);
+      if (outwardSpeed > 0) {
+        this.velocity.addScaledVector(outward, -outwardSpeed * Math.min(0.94, 0.55 + stretch * 0.08));
+      }
+    } else {
+      this.velocity.addScaledVector(directionToAnchor, 8 * delta);
+    }
+
+    const cameraForward = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion).normalize();
+    const cameraRight = new THREE.Vector3(1, 0, 0).applyQuaternion(this.camera.quaternion).normalize();
+    const desiredSwing = cameraForward
+      .addScaledVector(cameraRight, input.moveX * 0.45)
+      .addScaledVector(UP, 0.12 + Math.max(0, input.moveY) * 0.22)
+      .projectOnPlane(directionToAnchor);
+
+    if (desiredSwing.lengthSq() > 0.001) {
+      desiredSwing.normalize();
+      const dualGrappleFactor = this.leftGrapple.active && this.rightGrapple.active ? 0.62 : 1;
+      const swingAssist = (15 + Math.max(0, input.moveY) * 13) * dualGrappleFactor;
+      this.velocity.addScaledVector(desiredSwing, swingAssist * delta);
+    }
+
+    if (anchorHeight > 5 && this.velocity.y < 2.5) {
+      this.velocity.y += Math.min(4.5, anchorHeight * 0.16) * delta;
+    }
+  }
+
+  private findWallContact(): WallContact | undefined {
+    const point = this.playerPosition;
+    let bestContact: WallContact | undefined;
+    let bestDistance = 0.92;
+
+    const consider = (distance: number, normal: THREE.Vector3): void => {
+      if (distance >= bestDistance) return;
+      bestDistance = distance;
+      bestContact = { normal: normal.clone(), distance };
+    };
+
+    for (const collider of this.level.colliders) {
+      if (collider.max.y - collider.min.y < 4) continue;
+      if (point.y < collider.min.y - 0.5 || point.y > collider.max.y + 0.5) continue;
+
+      const withinZ = point.z >= collider.min.z - this.playerRadius && point.z <= collider.max.z + this.playerRadius;
+      const withinX = point.x >= collider.min.x - this.playerRadius && point.x <= collider.max.x + this.playerRadius;
+
+      if (withinZ) {
+        consider(Math.abs(point.x - (collider.min.x - this.playerRadius)), new THREE.Vector3(-1, 0, 0));
+        consider(Math.abs(point.x - (collider.max.x + this.playerRadius)), new THREE.Vector3(1, 0, 0));
+      }
+
+      if (withinX) {
+        consider(Math.abs(point.z - (collider.min.z - this.playerRadius)), new THREE.Vector3(0, 0, -1));
+        consider(Math.abs(point.z - (collider.max.z + this.playerRadius)), new THREE.Vector3(0, 0, 1));
+      }
+    }
+
+    return bestContact;
+  }
+
+  private applyWallRun(contact: WallContact, input: InputSnapshot, delta: number): void {
+    const normal = contact.normal;
+    const flatForward = this.getFlatCameraForward();
+    const facingIntoWall = flatForward.dot(normal.clone().negate());
+    const wallTangent = new THREE.Vector3().crossVectors(UP, normal).normalize();
+
+    if (wallTangent.dot(flatForward) < 0) wallTangent.negate();
+
+    let runDirection: THREE.Vector3;
+    let targetSpeed: number;
+
+    if (facingIntoWall > 0.48) {
+      const lateralInfluence = input.moveX * 0.42;
+      runDirection = UP.clone().multiplyScalar(0.9).addScaledVector(wallTangent, lateralInfluence).normalize();
+      targetSpeed = 15.5;
+    } else {
+      runDirection = wallTangent.addScaledVector(UP, 0.16).normalize();
+      targetSpeed = 18;
+    }
+
+    const speedAlongWall = this.velocity.dot(runDirection);
+    if (speedAlongWall < targetSpeed) {
+      this.velocity.addScaledVector(
+        runDirection,
+        (targetSpeed - speedAlongWall) * Math.min(1, delta * 7),
+      );
+    }
+
+    const outwardSpeed = this.velocity.dot(normal);
+    if (outwardSpeed > 0) this.velocity.addScaledVector(normal, -outwardSpeed);
+
+    this.velocity.addScaledVector(normal, -7.5 * delta);
+    this.velocity.y = Math.max(this.velocity.y, facingIntoWall > 0.48 ? 4.2 : -0.8);
   }
 
   private updateGrappleLine(grapple: GrappleState): void {
@@ -355,10 +552,12 @@ export class Game {
         if (this.velocity.y < 0) this.velocity.y = 0;
       } else {
         if (intoSurface < 0) this.velocity.addScaledVector(normal, -intoSurface * 1.25);
-        this.velocity.multiplyScalar(0.72);
+
+        const isRunningOnWall = this.wallRunning && normal.dot(this.wallRunNormal) > 0.75;
+        if (!isRunningOnWall) this.velocity.multiplyScalar(0.72);
       }
 
-      if (this.collisionCooldown <= 0 && normal.y < 0.5 && Math.abs(intoSurface) > 8) {
+      if (this.collisionCooldown <= 0 && normal.y < 0.5 && !this.wallRunning && Math.abs(intoSurface) > 8) {
         this.score = Math.max(0, this.score - 35);
         this.showMessage('Impact! −35 points');
         this.collisionCooldown = 0.65;
@@ -434,7 +633,7 @@ export class Game {
   }
 
   private updateReticle(): void {
-    const canGrapple = Boolean(this.findGrappleHit(0));
+    const canGrapple = Boolean(this.findGrappleHit(0, false));
     this.hud.reticle.classList.toggle('can-grapple', canGrapple);
   }
 
