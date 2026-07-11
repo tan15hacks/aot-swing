@@ -18,6 +18,7 @@ interface InputCallbacks {
 
 export class InputController {
   private readonly keys = new Set<string>();
+  private readonly lookPointers = new Map<number, THREE.Vector2>();
   private mouseLeft = false;
   private mouseRight = false;
   private touchLeft = false;
@@ -25,10 +26,9 @@ export class InputController {
   private touchBoost = false;
   private touchBrake = false;
   private joystickPointer: number | null = null;
-  private lookPointer: number | null = null;
-  private lookLast = new THREE.Vector2();
   private joystickCenter = new THREE.Vector2();
   private joystickValue = new THREE.Vector2();
+  private joystickRadius = 42;
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -88,6 +88,12 @@ export class InputController {
       this.keys.clear();
       this.mouseLeft = false;
       this.mouseRight = false;
+      this.touchLeft = false;
+      this.touchRight = false;
+      this.touchBoost = false;
+      this.touchBrake = false;
+      this.lookPointers.clear();
+      this.joystickValue.set(0, 0);
     });
   }
 
@@ -96,32 +102,18 @@ export class InputController {
     const knob = document.querySelector<HTMLElement>('[data-control="joystick-knob"]');
     const lookPad = document.querySelector<HTMLElement>('[data-control="look"]');
 
-    const setHold = (selector: string, setter: (active: boolean) => void): void => {
-      const element = document.querySelector<HTMLElement>(selector);
-      if (!element) return;
-      const begin = (event: PointerEvent): void => {
-        event.preventDefault();
-        element.setPointerCapture(event.pointerId);
-        setter(true);
-        element.classList.add('is-active');
-      };
-      const end = (event: PointerEvent): void => {
-        event.preventDefault();
-        setter(false);
-        element.classList.remove('is-active');
-      };
-      element.addEventListener('pointerdown', begin);
-      element.addEventListener('pointerup', end);
-      element.addEventListener('pointercancel', end);
-      element.addEventListener('pointerleave', (event) => {
-        if (event.buttons === 0) end(event);
-      });
-    };
-
-    setHold('[data-control="grapple-left"]', (active) => (this.touchLeft = active));
-    setHold('[data-control="grapple-right"]', (active) => (this.touchRight = active));
-    setHold('[data-control="boost"]', (active) => (this.touchBoost = active));
-    setHold('[data-control="brake"]', (active) => (this.touchBrake = active));
+    this.bindAimHold('[data-control="grapple-left"]', (active) => {
+      this.touchLeft = active;
+    });
+    this.bindAimHold('[data-control="grapple-right"]', (active) => {
+      this.touchRight = active;
+    });
+    this.bindHold('[data-control="boost"]', (active) => {
+      this.touchBoost = active;
+    });
+    this.bindHold('[data-control="brake"]', (active) => {
+      this.touchBrake = active;
+    });
 
     document.querySelector<HTMLElement>('[data-control="reset"]')?.addEventListener('click', () => {
       this.callbacks.onReset();
@@ -129,10 +121,12 @@ export class InputController {
 
     joystick?.addEventListener('pointerdown', (event) => {
       event.preventDefault();
+      if (this.joystickPointer !== null) return;
       this.joystickPointer = event.pointerId;
       joystick.setPointerCapture(event.pointerId);
       const rect = joystick.getBoundingClientRect();
       this.joystickCenter.set(rect.left + rect.width / 2, rect.top + rect.height / 2);
+      this.joystickRadius = Math.max(32, rect.width * 0.36);
       this.updateJoystick(event.clientX, event.clientY, knob);
     });
 
@@ -144,6 +138,7 @@ export class InputController {
 
     const releaseJoystick = (event: PointerEvent): void => {
       if (event.pointerId !== this.joystickPointer) return;
+      event.preventDefault();
       this.joystickPointer = null;
       this.joystickValue.set(0, 0);
       if (knob) knob.style.transform = 'translate3d(0, 0, 0)';
@@ -152,34 +147,106 @@ export class InputController {
     joystick?.addEventListener('pointercancel', releaseJoystick);
 
     lookPad?.addEventListener('pointerdown', (event) => {
-      if (this.lookPointer !== null) return;
       event.preventDefault();
-      this.lookPointer = event.pointerId;
-      this.lookLast.set(event.clientX, event.clientY);
       lookPad.setPointerCapture(event.pointerId);
+      this.beginLook(event);
     });
 
     lookPad?.addEventListener('pointermove', (event) => {
-      if (event.pointerId !== this.lookPointer) return;
       event.preventDefault();
-      const deltaX = event.clientX - this.lookLast.x;
-      const deltaY = event.clientY - this.lookLast.y;
-      this.lookLast.set(event.clientX, event.clientY);
-      this.callbacks.onLook(deltaX * 0.72, deltaY * 0.72);
+      this.moveLook(event);
     });
 
     const releaseLook = (event: PointerEvent): void => {
-      if (event.pointerId === this.lookPointer) this.lookPointer = null;
+      event.preventDefault();
+      this.endLook(event.pointerId);
     };
     lookPad?.addEventListener('pointerup', releaseLook);
     lookPad?.addEventListener('pointercancel', releaseLook);
   }
 
+  private bindAimHold(selector: string, setter: (active: boolean) => void): void {
+    const element = document.querySelector<HTMLElement>(selector);
+    if (!element) return;
+    const activePointers = new Set<number>();
+
+    element.addEventListener('pointerdown', (event) => {
+      event.preventDefault();
+      element.setPointerCapture(event.pointerId);
+      activePointers.add(event.pointerId);
+      setter(true);
+      element.classList.add('is-active');
+      this.beginLook(event);
+    });
+
+    element.addEventListener('pointermove', (event) => {
+      if (!activePointers.has(event.pointerId)) return;
+      event.preventDefault();
+      this.moveLook(event);
+    });
+
+    const end = (event: PointerEvent): void => {
+      if (!activePointers.has(event.pointerId)) return;
+      event.preventDefault();
+      activePointers.delete(event.pointerId);
+      this.endLook(event.pointerId);
+      setter(activePointers.size > 0);
+      if (activePointers.size === 0) element.classList.remove('is-active');
+    };
+
+    element.addEventListener('pointerup', end);
+    element.addEventListener('pointercancel', end);
+  }
+
+  private bindHold(selector: string, setter: (active: boolean) => void): void {
+    const element = document.querySelector<HTMLElement>(selector);
+    if (!element) return;
+    const activePointers = new Set<number>();
+
+    element.addEventListener('pointerdown', (event) => {
+      event.preventDefault();
+      element.setPointerCapture(event.pointerId);
+      activePointers.add(event.pointerId);
+      setter(true);
+      element.classList.add('is-active');
+    });
+
+    const end = (event: PointerEvent): void => {
+      if (!activePointers.has(event.pointerId)) return;
+      event.preventDefault();
+      activePointers.delete(event.pointerId);
+      setter(activePointers.size > 0);
+      if (activePointers.size === 0) element.classList.remove('is-active');
+    };
+
+    element.addEventListener('pointerup', end);
+    element.addEventListener('pointercancel', end);
+  }
+
+  private beginLook(event: PointerEvent): void {
+    this.lookPointers.set(event.pointerId, new THREE.Vector2(event.clientX, event.clientY));
+  }
+
+  private moveLook(event: PointerEvent): void {
+    const previous = this.lookPointers.get(event.pointerId);
+    if (!previous) return;
+
+    const deltaX = event.clientX - previous.x;
+    const deltaY = event.clientY - previous.y;
+    previous.set(event.clientX, event.clientY);
+
+    // Touch receives extra gain so a comfortable thumb swipe can turn quickly.
+    this.callbacks.onLook(deltaX * 1.45, deltaY * 1.45);
+  }
+
+  private endLook(pointerId: number): void {
+    this.lookPointers.delete(pointerId);
+  }
+
   private updateJoystick(x: number, y: number, knob: HTMLElement | null): void {
     const delta = new THREE.Vector2(x - this.joystickCenter.x, y - this.joystickCenter.y);
-    const radius = 42;
-    if (delta.length() > radius) delta.setLength(radius);
-    this.joystickValue.copy(delta).divideScalar(radius);
+    if (delta.length() > this.joystickRadius) delta.setLength(this.joystickRadius);
+    this.joystickValue.copy(delta).divideScalar(this.joystickRadius);
     if (knob) knob.style.transform = `translate3d(${delta.x}px, ${delta.y}px, 0)`;
   }
 
