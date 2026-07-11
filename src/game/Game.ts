@@ -24,7 +24,7 @@ interface HudRefs {
 export class Game {
   private readonly renderer: THREE.WebGLRenderer;
   private readonly scene = new THREE.Scene();
-  private readonly camera = new THREE.PerspectiveCamera(78, innerWidth / innerHeight, 0.1, 500);
+  private readonly camera = new THREE.PerspectiveCamera(82, innerWidth / innerHeight, 0.1, 500);
   private readonly clock = new THREE.Clock();
   private readonly playerPosition = new THREE.Vector3();
   private readonly velocity = new THREE.Vector3();
@@ -32,12 +32,14 @@ export class Game {
   private readonly input: InputController;
   private readonly hud: HudRefs;
   private readonly playerRadius = 0.72;
+  private readonly eyeHeight = 1.78;
   private readonly yawPitch = new THREE.Euler(0, 0, 0, 'YXZ');
   private level!: LevelData;
   private levelNumber = 1;
   private score = 0;
   private energy = 100;
   private playing = false;
+  private grounded = false;
   private levelStartedAt = performance.now();
   private collisionCooldown = 0;
   private leftGrapple!: GrappleState;
@@ -153,19 +155,23 @@ export class Game {
 
   private resetLevel(message: string): void {
     this.playerPosition.copy(this.level.spawn);
-    this.velocity.set(0, 0, -1.5);
+    this.velocity.set(0, 0, 0);
     this.energy = 100;
+    this.grounded = false;
     this.levelStartedAt = performance.now();
+    this.yawPitch.set(-0.04, 0, 0);
+    this.camera.quaternion.setFromEuler(this.yawPitch);
+    this.updateCameraPosition();
     this.releaseGrapple(this.leftGrapple);
     this.releaseGrapple(this.rightGrapple);
     this.showMessage(message);
   }
 
   private look(deltaX: number, deltaY: number): void {
-    const sensitivity = 0.00235;
+    const sensitivity = 0.00335;
     this.yawPitch.y -= deltaX * sensitivity;
     this.yawPitch.x -= deltaY * sensitivity;
-    this.yawPitch.x = THREE.MathUtils.clamp(this.yawPitch.x, -1.42, 1.42);
+    this.yawPitch.x = THREE.MathUtils.clamp(this.yawPitch.x, -1.45, 1.45);
     this.camera.quaternion.setFromEuler(this.yawPitch);
   }
 
@@ -181,36 +187,60 @@ export class Game {
 
   private update(delta: number): void {
     const input = this.input.snapshot();
-    this.handleGrappleInput(this.leftGrapple, input.grappleLeft, -0.18);
-    this.handleGrappleInput(this.rightGrapple, input.grappleRight, 0.18);
+    this.handleGrappleInput(this.leftGrapple, input.grappleLeft, -0.05);
+    this.handleGrappleInput(this.rightGrapple, input.grappleRight, 0.05);
 
+    const wasGrounded = this.grounded;
+    const moveStrength = Math.min(1, Math.hypot(input.moveX, input.moveY));
     const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion);
     const right = new THREE.Vector3(1, 0, 0).applyQuaternion(this.camera.quaternion);
-    const steer = forward.multiplyScalar(input.moveY).add(right.multiplyScalar(input.moveX));
-    if (steer.lengthSq() > 0) {
-      steer.normalize();
-      this.velocity.addScaledVector(steer, 8.5 * delta);
+    forward.y = 0;
+    right.y = 0;
+    forward.normalize();
+    right.normalize();
+
+    const moveDirection = forward.multiplyScalar(input.moveY).add(right.multiplyScalar(input.moveX));
+    if (moveDirection.lengthSq() > 0.001) {
+      moveDirection.normalize();
+      const movementAcceleration = wasGrounded ? 46 : 26;
+      this.velocity.addScaledVector(moveDirection, movementAcceleration * moveStrength * delta);
+
+      if (wasGrounded) {
+        const horizontalVelocity = new THREE.Vector3(this.velocity.x, 0, this.velocity.z);
+        const movementSpeed = horizontalVelocity.dot(moveDirection);
+        if (movementSpeed < 11) {
+          this.velocity.addScaledVector(
+            moveDirection,
+            (11 - movementSpeed) * Math.min(1, delta * 10),
+          );
+        }
+      }
+    } else if (wasGrounded) {
+      const groundDamping = Math.pow(0.82, delta * 60);
+      this.velocity.x *= groundDamping;
+      this.velocity.z *= groundDamping;
     }
 
-    this.velocity.y -= 13.5 * delta;
-    this.velocity.multiplyScalar(Math.pow(0.996, delta * 60));
+    this.velocity.y -= 15 * delta;
+    this.velocity.multiplyScalar(Math.pow(0.998, delta * 60));
 
     this.applyGrappleForce(this.leftGrapple, delta);
     this.applyGrappleForce(this.rightGrapple, delta);
 
     if (input.boost && this.energy > 0) {
       const boostDirection = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion).normalize();
-      this.velocity.addScaledVector(boostDirection, 20 * delta);
-      this.energy = Math.max(0, this.energy - 24 * delta);
+      this.velocity.addScaledVector(boostDirection, 34 * delta);
+      this.energy = Math.max(0, this.energy - 22 * delta);
     } else {
-      this.energy = Math.min(100, this.energy + 9 * delta);
+      this.energy = Math.min(100, this.energy + 11 * delta);
     }
 
-    if (input.brake) this.velocity.multiplyScalar(Math.pow(0.94, delta * 60));
+    if (input.brake) this.velocity.multiplyScalar(Math.pow(0.91, delta * 60));
 
-    const maxSpeed = input.boost ? 48 : 38;
+    const maxSpeed = input.boost ? 62 : 46;
     if (this.velocity.length() > maxSpeed) this.velocity.setLength(maxSpeed);
 
+    this.grounded = false;
     this.playerPosition.addScaledVector(this.velocity, delta);
     this.resolveCollisions(delta);
     this.collectItems();
@@ -218,11 +248,16 @@ export class Game {
 
     if (this.playerPosition.y < -18) this.resetLevel('You fell — try another line');
 
-    this.camera.position.copy(this.playerPosition);
+    this.updateCameraPosition();
     this.updateGrappleLine(this.leftGrapple);
     this.updateGrappleLine(this.rightGrapple);
     this.updateHud();
     this.updateReticle();
+  }
+
+  private updateCameraPosition(): void {
+    this.camera.position.copy(this.playerPosition);
+    this.camera.position.y += this.eyeHeight;
   }
 
   private handleGrappleInput(grapple: GrappleState, held: boolean, ndcX: number): void {
@@ -232,18 +267,33 @@ export class Game {
   }
 
   private fireGrapple(grapple: GrappleState, ndcX: number): void {
-    this.raycaster.setFromCamera(new THREE.Vector2(ndcX, 0), this.camera);
-    this.raycaster.far = 75;
-    const hit = this.raycaster.intersectObjects(this.level.grappleMeshes, false)[0];
-    if (!hit) {
-      this.showMessage(`${grapple.side === 'left' ? 'Left' : 'Right'} tether missed`);
-      return;
-    }
+    const hit = this.findGrappleHit(ndcX);
+    if (!hit) return;
 
     grapple.active = true;
     grapple.target.copy(hit.point);
     grapple.line.visible = true;
     this.score += 5;
+  }
+
+  private findGrappleHit(ndcX: number): THREE.Intersection | undefined {
+    const aimSamples = [
+      new THREE.Vector2(ndcX, 0),
+      new THREE.Vector2(0, 0),
+      new THREE.Vector2(ndcX - 0.065, 0),
+      new THREE.Vector2(ndcX + 0.065, 0),
+      new THREE.Vector2(ndcX, -0.055),
+      new THREE.Vector2(ndcX, 0.055),
+    ];
+
+    let bestHit: THREE.Intersection | undefined;
+    for (const sample of aimSamples) {
+      this.raycaster.setFromCamera(sample, this.camera);
+      this.raycaster.far = 110;
+      const hit = this.raycaster.intersectObjects(this.level.grappleMeshes, false)[0];
+      if (hit && (!bestHit || hit.distance < bestHit.distance)) bestHit = hit;
+    }
+    return bestHit;
   }
 
   private releaseGrapple(grapple: GrappleState): void {
@@ -258,18 +308,18 @@ export class Game {
     if (distance < 1) return;
 
     const direction = toTarget.divideScalar(distance);
-    const pullStrength = THREE.MathUtils.clamp(18 + distance * 0.48, 18, 48);
+    const pullStrength = THREE.MathUtils.clamp(30 + distance * 0.65, 30, 72);
     this.velocity.addScaledVector(direction, pullStrength * delta);
 
     const radialSpeed = this.velocity.dot(direction);
-    if (radialSpeed < -2) this.velocity.addScaledVector(direction, -radialSpeed * 0.22);
+    if (radialSpeed < -2) this.velocity.addScaledVector(direction, -radialSpeed * 0.28);
   }
 
   private updateGrappleLine(grapple: GrappleState): void {
     if (!grapple.active) return;
-    const sideOffset = new THREE.Vector3(grapple.side === 'left' ? -0.32 : 0.32, -0.24, -0.55)
+    const sideOffset = new THREE.Vector3(grapple.side === 'left' ? -0.32 : 0.32, -0.28, -0.55)
       .applyQuaternion(this.camera.quaternion)
-      .add(this.playerPosition);
+      .add(this.camera.position);
     const positions = grapple.line.geometry.attributes.position as THREE.BufferAttribute;
     positions.setXYZ(0, sideOffset.x, sideOffset.y, sideOffset.z);
     positions.setXYZ(1, grapple.target.x, grapple.target.y, grapple.target.z);
@@ -294,17 +344,21 @@ export class Game {
       ].sort((a, b) => a.value - b.value);
 
       const hit = distances[0];
+      const axis = hit.axis as 'x' | 'y' | 'z';
       const normal = new THREE.Vector3();
-      normal[hit.axis as 'x' | 'y' | 'z'] = hit.sign;
-      point[hit.axis as 'x' | 'y' | 'z'] = hit.sign < 0
-        ? expanded.min[hit.axis as 'x' | 'y' | 'z'] - 0.01
-        : expanded.max[hit.axis as 'x' | 'y' | 'z'] + 0.01;
+      normal[axis] = hit.sign;
+      point[axis] = hit.sign < 0 ? expanded.min[axis] - 0.01 : expanded.max[axis] + 0.01;
 
       const intoSurface = this.velocity.dot(normal);
-      if (intoSurface < 0) this.velocity.addScaledVector(normal, -intoSurface * 1.35);
-      this.velocity.multiplyScalar(0.58);
+      if (normal.y > 0.5) {
+        this.grounded = true;
+        if (this.velocity.y < 0) this.velocity.y = 0;
+      } else {
+        if (intoSurface < 0) this.velocity.addScaledVector(normal, -intoSurface * 1.25);
+        this.velocity.multiplyScalar(0.72);
+      }
 
-      if (this.collisionCooldown <= 0 && Math.abs(intoSurface) > 7) {
+      if (this.collisionCooldown <= 0 && normal.y < 0.5 && Math.abs(intoSurface) > 8) {
         this.score = Math.max(0, this.score - 35);
         this.showMessage('Impact! −35 points');
         this.collisionCooldown = 0.65;
@@ -380,9 +434,7 @@ export class Game {
   }
 
   private updateReticle(): void {
-    this.raycaster.setFromCamera(new THREE.Vector2(0, 0), this.camera);
-    this.raycaster.far = 75;
-    const canGrapple = this.raycaster.intersectObjects(this.level.grappleMeshes, false).length > 0;
+    const canGrapple = Boolean(this.findGrappleHit(0));
     this.hud.reticle.classList.toggle('can-grapple', canGrapple);
   }
 
